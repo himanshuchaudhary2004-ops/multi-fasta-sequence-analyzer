@@ -47,3 +47,14 @@ should be validated with specialist tools before publication or clinical use.
 
 Branded research-dashboard header, module badges, KPI cards, contextual panels,
 polished navigation, visual containers and structured analytical workflow.
+
+## Automated tests
+
+The repository includes a pytest suite for the sequence-analysis helpers and a
+GitHub Actions workflow that runs syntax checks, flake8 and pytest on Python 3.11.
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pytest flake8
+python -m pytest -q
+```
