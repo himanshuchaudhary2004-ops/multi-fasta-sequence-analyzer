@@ -1,948 +1,440 @@
+
 import io
+import math
+import re
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from Bio import SeqIO
-import plotly.express as px
-import plotly.graph_objects as go
-from scipy.stats import linregress
-
-
-# ============================================================
-# Page configuration
-# ============================================================
-
-st.set_page_config(
-    page_title="Multi-FASTA Sequence Analyzer",
-    page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 2.25rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
-    }
-    .subtitle {
-        color: #666;
-        font-size: 1rem;
-        margin-bottom: 1.2rem;
-    }
-    .metric-note {
-        font-size: 0.8rem;
-        color: #777;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown('<div class="main-title">🧬 Multi-FASTA Sequence Analyzer</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Python bioinformatics dashboard for sequence composition, GC analysis, statistics and visualization.</div>',
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# Helper functions
-# ============================================================
-
-DNA_BASES = set("ATGC")
-
-
-def clean_sequence(seq: str) -> str:
-    """Remove whitespace and convert a sequence to uppercase."""
-    return "".join(str(seq).split()).upper()
-
-
-def analyze_record(record, low_gc: float, high_gc: float) -> dict:
-    """Calculate sequence-level statistics."""
-    seq = clean_sequence(record.seq)
-    length = len(seq)
-
-    counts = {base: seq.count(base) for base in "ATGC"}
-    valid = sum(counts.values())
-    invalid = length - valid
-
-    if valid:
-        gc_pct = (counts["G"] + counts["C"]) / valid * 100
-        at_pct = (counts["A"] + counts["T"]) / valid * 100
-    else:
-        gc_pct = np.nan
-        at_pct = np.nan
-
-    if valid and (counts["G"] + counts["C"]) > 0:
-        gc_skew = (counts["G"] - counts["C"]) / (counts["G"] + counts["C"])
-    else:
-        gc_skew = np.nan
-
-    if valid and (counts["A"] + counts["T"]) > 0:
-        at_skew = (counts["A"] - counts["T"]) / (counts["A"] + counts["T"])
-    else:
-        at_skew = np.nan
-
-    if np.isnan(gc_pct):
-        classification = "No valid DNA bases"
-    elif gc_pct < low_gc:
-        classification = "AT-rich"
-    elif gc_pct > high_gc:
-        classification = "GC-rich"
-    else:
-        classification = "Balanced"
-
-    return {
-        "Sequence ID": record.id,
-        "Description": record.description,
-        "Length (bp)": length,
-        "A": counts["A"],
-        "T": counts["T"],
-        "G": counts["G"],
-        "C": counts["C"],
-        "GC %": round(gc_pct, 2) if not np.isnan(gc_pct) else np.nan,
-        "AT %": round(at_pct, 2) if not np.isnan(at_pct) else np.nan,
-        "GC Skew": round(gc_skew, 4) if not np.isnan(gc_skew) else np.nan,
-        "AT Skew": round(at_skew, 4) if not np.isnan(at_skew) else np.nan,
-        "Valid Bases": valid,
-        "Invalid Bases": invalid,
-        "Classification": classification,
-    }
-
-
-def parse_fasta(uploaded_file, low_gc: float, high_gc: float):
-    """Parse an uploaded FASTA file and return records, sequences and results."""
-    raw = uploaded_file.getvalue()
-    text = raw.decode("utf-8", errors="replace")
-
-    records = list(SeqIO.parse(io.StringIO(text), "fasta"))
-
-    results = []
-    sequences = {}
-
-    for record in records:
-        seq = clean_sequence(record.seq)
-        sequences[record.id] = seq
-        results.append(analyze_record(record, low_gc, high_gc))
-
-    return records, sequences, pd.DataFrame(results)
-
-
-def sliding_gc(seq: str, window: int, step: int) -> pd.DataFrame:
-    """Calculate GC% in a sliding window."""
-    seq = clean_sequence(seq)
-    rows = []
-
-    if len(seq) < window:
-        return pd.DataFrame(columns=["Start", "End", "GC %"])
-
-    for start in range(0, len(seq) - window + 1, step):
-        window_seq = seq[start:start + window]
-        valid = sum(window_seq.count(base) for base in "ATGC")
-        gc = window_seq.count("G") + window_seq.count("C")
-        gc_pct = (gc / valid * 100) if valid else np.nan
-
-        rows.append(
-            {
-                "Start": start + 1,
-                "End": start + window,
-                "GC %": round(gc_pct, 2) if not np.isnan(gc_pct) else np.nan,
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def make_excel(df: pd.DataFrame, summary: pd.DataFrame) -> bytes:
-    """Create an Excel workbook in memory."""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sequence Results")
-        summary.to_excel(writer, index=False, sheet_name="Summary")
-    output.seek(0)
-    return output.getvalue()
-
-
-def make_fasta(records) -> bytes:
-    """Return the parsed FASTA records as normalized FASTA bytes."""
-    output = io.StringIO()
-    SeqIO.write(records, output, "fasta")
-    return output.getvalue().encode("utf-8")
-
-
-# ============================================================
-# Sidebar
-# ============================================================
-
-with st.sidebar:
-    st.header("⚙️ Analysis Settings")
-
-    low_gc = st.number_input(
-        "AT-rich threshold (%)",
-        min_value=0.0,
-        max_value=100.0,
-        value=45.0,
-        step=1.0,
-        help="Sequences below this GC% are classified as AT-rich.",
-    )
-
-    high_gc = st.number_input(
-        "GC-rich threshold (%)",
-        min_value=0.0,
-        max_value=100.0,
-        value=55.0,
-        step=1.0,
-        help="Sequences above this GC% are classified as GC-rich.",
-    )
-
-    st.divider()
-
-    st.markdown("### Sliding-window GC")
-    window = st.number_input(
-        "Window size (bp)",
-        min_value=10,
-        max_value=1000000,
-        value=100,
-        step=10,
-    )
-    step = st.number_input(
-        "Step size (bp)",
-        min_value=1,
-        max_value=1000000,
-        value=25,
-        step=5,
-    )
-
-    st.divider()
-    st.caption("GC% is calculated as (G + C) / (A + T + G + C) × 100. "
-               "Invalid/ambiguous characters are excluded from the denominator.")
-
-
-if low_gc >= high_gc:
-    st.error("The AT-rich threshold must be lower than the GC-rich threshold.")
-    st.stop()
-
-
-# ============================================================
-# File upload
-# ============================================================
-
-uploaded_file = st.file_uploader(
-    "📁 Upload a Multi-FASTA file",
-    type=["fasta", "fa", "fna", "fas"],
-    help="Accepted formats: .fasta, .fa, .fna, .fas",
-)
-
-if uploaded_file is None:
-    st.info("Upload a FASTA file to begin the analysis.")
-
-    st.markdown("### Example FASTA format")
-    st.code(
-        """>Gene_1
-ATGCGTACGTAGCTAGCTAGCTAGCGCGCGATATATCGCG
->Gene_2
-ATATATATCGCGCGCGATATCGCGATATATCGCGCG
->Gene_3
-GGCGCGCGCGATCGCGCGATCGATCGCGCGATCGCGCGCG""",
-        language="text",
-    )
-
-    st.markdown("### What this app calculates")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("**Sequence metrics**")
-        st.write("Length, A/T/G/C counts, valid and invalid bases")
-    with c2:
-        st.markdown("**Composition**")
-        st.write("GC%, AT%, GC skew, AT skew and GC classification")
-    with c3:
-        st.markdown("**Visualization**")
-        st.write("Bar charts, histograms, scatter plots, box plots and sliding-window GC")
-    st.stop()
-
-
-# ============================================================
-# Parse data
-# ============================================================
-
-try:
-    records, sequences, df = parse_fasta(uploaded_file, low_gc, high_gc)
-except Exception as exc:
-    st.error(f"Could not read the FASTA file: {exc}")
-    st.stop()
-
-if df.empty:
-    st.error("No FASTA records were found in the uploaded file.")
-    st.stop()
-
-duplicate_ids = df.loc[df["Sequence ID"].duplicated(), "Sequence ID"].tolist()
-
-# ============================================================
-# Overview metrics
-# ============================================================
-
-valid_df = df[df["Valid Bases"] > 0].copy()
-
-total_sequences = len(df)
-total_bp = int(df["Length (bp)"].sum())
-average_length = float(df["Length (bp)"].mean())
-average_gc = float(valid_df["GC %"].mean()) if not valid_df.empty else np.nan
-min_gc = float(valid_df["GC %"].min()) if not valid_df.empty else np.nan
-max_gc = float(valid_df["GC %"].max()) if not valid_df.empty else np.nan
-
-st.subheader("📌 Overview")
-
-m1, m2, m3, m4, m5 = st.columns(5)
-
-m1.metric("Sequences", f"{total_sequences:,}")
-m2.metric("Total bp", f"{total_bp:,}")
-m3.metric("Average length", f"{average_length:,.1f} bp")
-m4.metric("Average GC", f"{average_gc:.2f}%" if not np.isnan(average_gc) else "N/A")
-m5.metric(
-    "GC range",
-    f"{min_gc:.1f}–{max_gc:.1f}%" if not np.isnan(min_gc) else "N/A",
-)
-
-if duplicate_ids:
-    st.warning(
-        f"Duplicate sequence IDs detected: {', '.join(duplicate_ids[:10])}"
-        + (" ..." if len(duplicate_ids) > 10 else "")
-    )
-
-if int(df["Invalid Bases"].sum()) > 0:
-    st.warning(
-        f"Found {int(df['Invalid Bases'].sum()):,} characters outside A/T/G/C. "
-        "These characters are excluded from GC% and AT% denominators."
-    )
-
-
-
-# ============================================================
-# Advanced analysis helpers
-# ============================================================
-
-def sequence_type(seq):
-    s = clean_sequence(seq)
-    if not s:
-        return "Empty"
-    chars = set(s)
-    if chars <= set("ATGCNRYKMSWBDHV"):
-        return "DNA"
-    if chars <= set("AUGCNRYKMSWBDHV"):
-        return "RNA"
-    if chars <= set("ACDEFGHIKLMNPQRSTVWYBXZJUO*"):
-        return "Protein"
+from Bio.Seq import Seq
+
+st.set_page_config(page_title="Multi-FASTA Sequence Analyzer", page_icon="🧬", layout="wide")
+
+st.markdown("""
+<style>
+.block-container{padding-top:1.1rem;padding-bottom:2rem}
+.hero{padding:1.4rem 1.6rem;border-radius:18px;border:1px solid rgba(120,120,120,.2);
+background:linear-gradient(135deg,rgba(45,95,170,.12),rgba(55,170,135,.10));margin-bottom:1rem}
+.hero h1{margin:0;font-size:2.1rem}.hero p{margin:.45rem 0 0;opacity:.76}
+[data-testid="stMetric"]{border:1px solid rgba(120,120,120,.16);padding:.6rem;border-radius:12px}
+.muted{opacity:.68;font-size:.86rem}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""<div class="hero"><h1>🧬 Multi-FASTA Sequence Analyzer</h1>
+<p>Professional FASTA QC, sequence statistics, visualization, ORF screening, motif,
+k-mer, codon, restriction-site, primer and comparative analysis.</p></div>""", unsafe_allow_html=True)
+
+DNA=set("ATGC")
+RNA=set("AUGC")
+AMBIGUOUS=set("NRYKMSWBDHV")
+PROTEIN=set("ACDEFGHIKLMNPQRSTVWYBXZJUO*")
+STOP_CODONS={"TAA","TAG","TGA"}
+RESTRICTION_ENZYMES={"EcoRI":"GAATTC","BamHI":"GGATCC","HindIII":"AAGCTT",
+                     "PstI":"CTGCAG","XhoI":"CTCGAG","NotI":"GCGGCCGC","SmaI":"CCCGGG"}
+
+def clean_sequence(seq):
+    return re.sub(r"\s+","",str(seq).upper())
+
+def detect_type(seq):
+    s=clean_sequence(seq)
+    if not s:return "Empty"
+    chars=set(s)
+    if chars <= DNA|AMBIGUOUS:return "DNA"
+    if chars <= RNA|AMBIGUOUS:return "RNA"
+    if chars <= PROTEIN:return "Protein"
     return "Mixed/Unknown"
 
+def gc_percent(seq):
+    s=clean_sequence(seq)
+    return 100.0*(s.count("G")+s.count("C"))/len(s) if s else 0.0
+
+def at_percent(seq):
+    s=clean_sequence(seq)
+    return 100.0*(s.count("A")+s.count("T"))/len(s) if s else 0.0
+
+def gc_skew(seq):
+    s=clean_sequence(seq); g=s.count("G"); c=s.count("C")
+    return (g-c)/(g+c) if g+c else 0.0
+
+def at_skew(seq):
+    s=clean_sequence(seq); a=s.count("A"); t=s.count("T")
+    return (a-t)/(a+t) if a+t else 0.0
 
 def shannon_entropy(seq):
-    s = clean_sequence(seq)
-    if not s:
-        return 0.0
-    counts = pd.Series(list(s)).value_counts()
-    p = counts / len(s)
-    return float(-(p * np.log2(p)).sum())
-
+    s=clean_sequence(seq)
+    if not s:return 0.0
+    counts=Counter(s); n=len(s)
+    return float(-sum((v/n)*math.log2(v/n) for v in counts.values()))
 
 def longest_homopolymer(seq):
-    s = clean_sequence(seq)
-    if not s:
-        return "", 0
-    best_base, best_len = s[0], 1
-    cur_base, cur_len = s[0], 1
+    s=clean_sequence(seq)
+    if not s:return "",0
+    best_base=cur_base=s[0]; best_len=cur_len=1
     for b in s[1:]:
-        if b == cur_base:
-            cur_len += 1
+        if b==cur_base:cur_len+=1
         else:
-            if cur_len > best_len:
-                best_base, best_len = cur_base, cur_len
-            cur_base, cur_len = b, 1
-    if cur_len > best_len:
-        best_base, best_len = cur_base, cur_len
-    return best_base, best_len
+            if cur_len>best_len:best_base,best_len=cur_base,cur_len
+            cur_base,cur_len=b,1
+    if cur_len>best_len:best_base,best_len=cur_base,cur_len
+    return best_base,best_len
 
+def ambiguous_count(seq):
+    return sum(b not in DNA for b in clean_sequence(seq))
 
-def kmer_table(seq, k):
-    s = clean_sequence(seq)
-    if len(s) < k:
-        return pd.DataFrame(columns=["k-mer", "Count", "Frequency (%)"])
-    counts = pd.Series([s[i:i+k] for i in range(len(s)-k+1)]).value_counts()
-    out = counts.rename_axis("k-mer").reset_index(name="Count")
-    out["Frequency (%)"] = 100 * out["Count"] / out["Count"].sum()
-    return out
+def quality_score(seq):
+    s=clean_sequence(seq)
+    if not s:return 0,["Empty sequence"]
+    score=100; flags=[]
+    invalid=sum(b not in DNA for b in s)
+    if invalid:score-=min(30,invalid);flags.append(f"{invalid} non-ACGT")
+    if len(s)<100:score-=5;flags.append("short")
+    _,hp=longest_homopolymer(s)
+    if hp>=10:score-=10;flags.append(f"homopolymer {hp}")
+    if len(set(s))<=2:score-=10;flags.append("low complexity")
+    return max(0,score),flags or ["PASS"]
 
+def gc_class(v):
+    if v<40:return "Low (<40%)"
+    if v<=60:return "Moderate (40–60%)"
+    return "High (>60%)"
 
-def motif_hits(seq, motif):
-    import re
-    s = clean_sequence(seq)
-    motif = motif.upper().strip()
-    if not motif:
-        return []
-    try:
-        return [m.start()+1 for m in re.finditer(f"(?={motif})", s)]
-    except re.error:
-        return []
-
-
-def codon_usage(seq):
-    s = clean_sequence(seq)
-    codons = [s[i:i+3] for i in range(0, len(s)-2, 3)]
-    codons = [c for c in codons if set(c) <= set("ATGC")]
-    if not codons:
-        return pd.DataFrame(columns=["Codon", "Count", "Frequency (%)"])
-    counts = pd.Series(codons).value_counts()
-    out = counts.rename_axis("Codon").reset_index(name="Count")
-    out["Frequency (%)"] = 100 * out["Count"] / len(codons)
-    return out
-
-
-def restriction_sites(seq):
-    import re
-    enzymes = {
-        "EcoRI": "GAATTC", "BamHI": "GGATCC", "HindIII": "AAGCTT",
-        "PstI": "CTGCAG", "XhoI": "CTCGAG", "NotI": "GCGGCCGC",
-        "SmaI": "CCCGGG"
-    }
-    s = clean_sequence(seq)
-    rows = []
-    for enzyme, motif in enzymes.items():
-        positions = [m.start()+1 for m in re.finditer(f"(?={motif})", s)]
-        rows.append({
-            "Enzyme": enzyme,
-            "Recognition site": motif,
-            "Sites": len(positions),
-            "Positions": ", ".join(map(str, positions[:100])) or "None"
-        })
+def sliding_metric(seq,window,metric):
+    s=clean_sequence(seq)
+    if len(s)<window:return pd.DataFrame(columns=["Position",metric])
+    rows=[]
+    for i in range(len(s)-window+1):
+        w=s[i:i+window]
+        val={"GC %":gc_percent,"GC Skew":gc_skew,"AT Skew":at_skew,
+             "Entropy":shannon_entropy}[metric](w)
+        rows.append({"Position":i+1,metric:val})
     return pd.DataFrame(rows)
 
-
-def simple_qc_score(seq):
-    s = clean_sequence(seq)
-    if not s:
-        return 0, ["Empty sequence"]
-    score = 100
-    flags = []
-    invalid = sum(b not in "ATGC" for b in s)
-    if invalid:
-        score -= min(30, invalid)
-        flags.append(f"{invalid} non-ACGT bases")
-    if len(s) < 100:
-        score -= 5
-        flags.append("Short sequence")
-    _, hp = longest_homopolymer(s)
-    if hp >= 10:
-        score -= 10
-        flags.append(f"Homopolymer length {hp}")
-    return max(0, score), flags or ["PASS"]
-
-
-# ============================================================
-# Tabs
-# ============================================================
-
-tab_overview, tab_table, tab_plots, tab_window, tab_qc, tab_tools, tab_report, tab_download = st.tabs(
-    ["📊 Overview", "🧾 Sequence Table", "📈 Visualizations", "🔬 Sliding GC",
-     "🧹 Research QC", "🧬 Sequence Tools", "📄 Report", "⬇️ Downloads"]
-)
-
-
-# ============================================================
-# Overview tab
-# ============================================================
-
-with tab_overview:
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown("#### GC classification")
-
-        class_counts = (
-            df["Classification"]
-            .value_counts()
-            .rename_axis("Classification")
-            .reset_index(name="Count")
-        )
-
-        fig_class = px.pie(
-            class_counts,
-            names="Classification",
-            values="Count",
-            hole=0.45,
-            title="Sequence classification by GC content",
-        )
-        fig_class.update_layout(margin=dict(t=50, b=10, l=10, r=10))
-        st.plotly_chart(fig_class, use_container_width=True)
-
-    with c2:
-        st.markdown("#### Overall nucleotide composition")
-
-        base_counts = pd.DataFrame(
-            {
-                "Base": ["A", "T", "G", "C"],
-                "Count": [
-                    int(df["A"].sum()),
-                    int(df["T"].sum()),
-                    int(df["G"].sum()),
-                    int(df["C"].sum()),
-                ],
-            }
-        )
-
-        fig_base = px.bar(
-            base_counts,
-            x="Base",
-            y="Count",
-            text_auto=True,
-            title="Total A/T/G/C counts",
-        )
-        fig_base.update_layout(margin=dict(t=50, b=10, l=10, r=10))
-        st.plotly_chart(fig_base, use_container_width=True)
-
-    st.markdown("#### Summary statistics")
-
-    summary = pd.DataFrame(
-        {
-            "Statistic": [
-                "Total sequences",
-                "Total base pairs",
-                "Average sequence length",
-                "Minimum sequence length",
-                "Maximum sequence length",
-                "Average GC%",
-                "Minimum GC%",
-                "Maximum GC%",
-                "Average AT%",
-                "Total invalid bases",
-            ],
-            "Value": [
-                total_sequences,
-                total_bp,
-                f"{average_length:.2f} bp",
-                f"{int(df['Length (bp)'].min())} bp",
-                f"{int(df['Length (bp)'].max())} bp",
-                f"{average_gc:.2f}%" if not np.isnan(average_gc) else "N/A",
-                f"{min_gc:.2f}%" if not np.isnan(min_gc) else "N/A",
-                f"{max_gc:.2f}%" if not np.isnan(max_gc) else "N/A",
-                f"{valid_df['AT %'].mean():.2f}%" if not valid_df.empty else "N/A",
-                int(df["Invalid Bases"].sum()),
-            ],
-        }
-    )
-
-    st.dataframe(summary, use_container_width=True, hide_index=True)
-
-
-# ============================================================
-# Table tab
-# ============================================================
-
-with tab_table:
-    st.subheader("Sequence-level analysis")
-
-    display_df = df.copy()
-
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "GC %": st.column_config.NumberColumn(format="%.2f"),
-            "AT %": st.column_config.NumberColumn(format="%.2f"),
-            "GC Skew": st.column_config.NumberColumn(format="%.4f"),
-            "AT Skew": st.column_config.NumberColumn(format="%.4f"),
-        },
-    )
-
-    st.caption(
-        "GC skew = (G − C)/(G + C); AT skew = (A − T)/(A + T). "
-        "These metrics are undefined when the corresponding denominator is zero."
-    )
-
-
-# ============================================================
-# Visualization tab
-# ============================================================
-
-with tab_plots:
-    st.subheader("Interactive visualizations")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        fig_gc = px.bar(
-            df,
-            x="Sequence ID",
-            y="GC %",
-            color="Classification",
-            hover_data=["Length (bp)", "AT %"],
-            title="GC content comparison",
-        )
-        fig_gc.update_yaxes(range=[0, 100], title="GC content (%)")
-        fig_gc.update_layout(xaxis_title="Sequence ID")
-        st.plotly_chart(fig_gc, use_container_width=True)
-
-    with c2:
-        fig_len = px.bar(
-            df,
-            x="Sequence ID",
-            y="Length (bp)",
-            color="Classification",
-            hover_data=["GC %"],
-            title="Sequence length comparison",
-        )
-        fig_len.update_layout(xaxis_title="Sequence ID", yaxis_title="Length (bp)")
-        st.plotly_chart(fig_len, use_container_width=True)
-
-    c3, c4 = st.columns(2)
-
-    with c3:
-        fig_hist = px.histogram(
-            valid_df,
-            x="GC %",
-            nbins=20,
-            title="GC content distribution",
-        )
-        fig_hist.update_xaxes(range=[0, 100], title="GC content (%)")
-        fig_hist.update_yaxes(title="Number of sequences")
-        st.plotly_chart(fig_hist, use_container_width=True)
-
-    with c4:
-        fig_box = px.box(
-            valid_df,
-            y="GC %",
-            points="outliers",
-            title="GC content spread and outliers",
-        )
-        fig_box.update_yaxes(range=[0, 100], title="GC content (%)")
-        st.plotly_chart(fig_box, use_container_width=True)
-
-    st.markdown("#### GC content vs sequence length")
-
-    if len(valid_df) >= 2 and valid_df["Length (bp)"].nunique() > 1:
-        x = valid_df["Length (bp)"].to_numpy(dtype=float)
-        y = valid_df["GC %"].to_numpy(dtype=float)
-
-        regression = linregress(x, y)
-
-        fig_scatter = px.scatter(
-            valid_df,
-            x="Length (bp)",
-            y="GC %",
-            color="Classification",
-            hover_name="Sequence ID",
-            title="Relationship between sequence length and GC content",
-        )
-
-        x_line = np.linspace(x.min(), x.max(), 100)
-        y_line = regression.intercept + regression.slope * x_line
-
-        fig_scatter.add_trace(
-            go.Scatter(
-                x=x_line,
-                y=y_line,
-                mode="lines",
-                name="Linear fit",
-            )
-        )
-        fig_scatter.update_yaxes(range=[0, 100])
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-        r2 = regression.rvalue ** 2
-        st.info(
-            f"Pearson r = {regression.rvalue:.3f} | "
-            f"R² = {r2:.3f} | p-value = {regression.pvalue:.3g}"
-        )
-    else:
-        st.info("At least two sequences with different lengths are required for a correlation plot.")
-
-    st.markdown("#### GC skew and AT skew")
-
-    skew_df = df[["Sequence ID", "GC Skew", "AT Skew"]].melt(
-        id_vars="Sequence ID",
-        var_name="Metric",
-        value_name="Value",
-    )
-
-    fig_skew = px.bar(
-        skew_df,
-        x="Sequence ID",
-        y="Value",
-        color="Metric",
-        barmode="group",
-        title="Sequence-level nucleotide skew",
-    )
-    st.plotly_chart(fig_skew, use_container_width=True)
-
-
-# ============================================================
-# Sliding-window tab
-# ============================================================
-
-with tab_window:
-    st.subheader("Sliding-window GC analysis")
-
-    sequence_id = st.selectbox(
-        "Select a sequence",
-        options=list(sequences.keys()),
-    )
-
-    selected_seq = sequences[sequence_id]
-
-    st.write(
-        f"**{sequence_id}** — {len(selected_seq):,} bp"
-    )
-
-    if len(selected_seq) < window:
-        st.warning(
-            f"The selected sequence is shorter than the {window}-bp window. "
-            "Reduce the window size in the sidebar."
-        )
-    else:
-        window_df = sliding_gc(selected_seq, int(window), int(step))
-
-        fig_window = px.line(
-            window_df,
-            x="Start",
-            y="GC %",
-            markers=False,
-            title=f"Sliding-window GC content: {sequence_id}",
-        )
-        fig_window.update_yaxes(range=[0, 100], title="GC content (%)")
-        fig_window.update_xaxes(title="Window start position (bp)")
-        st.plotly_chart(fig_window, use_container_width=True)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Minimum window GC", f"{window_df['GC %'].min():.2f}%")
-        c2.metric("Maximum window GC", f"{window_df['GC %'].max():.2f}%")
-        c3.metric("Mean window GC", f"{window_df['GC %'].mean():.2f}%")
-
-        st.dataframe(window_df, use_container_width=True, hide_index=True)
-
-
-
-# ============================================================
-# Research QC tab
-# ============================================================
-
-with tab_qc:
-    st.subheader("Research QC & Sequence Validation")
-    qc_rows = []
-    for sid, seq in sequences.items():
-        score, flags = simple_qc_score(seq)
-        qc_rows.append({
-            "Sequence ID": sid,
-            "Type": sequence_type(seq),
-            "Length (bp)": len(seq),
-            "GC %": round(gc_percent(seq), 2),
-            "Entropy": round(shannon_entropy(seq), 3),
-            "Quality Score": score,
-            "QC Status": "PASS" if score >= 90 else ("REVIEW" if score >= 70 else "FAIL"),
-            "Flags": "; ".join(flags),
-        })
-    qc_df = pd.DataFrame(qc_rows)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Mean QC score", f"{qc_df['Quality Score'].mean():.1f}/100")
-    c2.metric("PASS", int((qc_df["QC Status"] == "PASS").sum()))
-    c3.metric("REVIEW", int((qc_df["QC Status"] == "REVIEW").sum()))
-    c4.metric("FAIL", int((qc_df["QC Status"] == "FAIL").sum()))
-
-    st.dataframe(qc_df, use_container_width=True, hide_index=True)
-    fig = px.bar(qc_df, x="Sequence ID", y="Quality Score", color="QC Status",
-                 title="Per-sequence quality score")
-    fig.update_yaxes(range=[0, 100])
-    fig.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig, use_container_width=True)
-
-    comp = df.set_index("Sequence ID")[["A", "T", "G", "C"]]
-    fig = px.imshow(comp.T, text_auto=True, aspect="auto", title="A/T/G/C Count Heatmap")
-    st.plotly_chart(fig, use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.plotly_chart(px.histogram(df, x="Length (bp)", nbins=20,
-                                     title="Sequence length distribution"),
-                        use_container_width=True)
-    with c2:
-        st.plotly_chart(px.histogram(valid_df, x="GC %", nbins=20,
-                                     title="GC% distribution"),
-                        use_container_width=True)
-
-
-# ============================================================
-# Sequence Tools tab
-# ============================================================
-
-with tab_tools:
-    st.subheader("Sequence Tools")
-    tool_id = st.selectbox("Select sequence", list(sequences.keys()), key="tool_id")
-    seq = sequences[tool_id]
-
-    st.markdown("#### Motif / pattern search")
-    motif = st.text_input("Motif", value="ATG", key="motif")
-    hits = motif_hits(seq, motif)
-    st.write(f"**{len(hits)}** matches")
-    if hits:
-        st.write("1-based positions:", hits[:200])
-
-    st.markdown("#### k-mer analysis")
-    k = st.selectbox("k-mer size", [2, 3, 4, 5, 6], index=1)
-    kt = kmer_table(seq, k)
-    if not kt.empty:
-        n = st.slider("Top k-mers", 5, min(50, len(kt)), min(20, len(kt)))
-        st.plotly_chart(px.bar(kt.head(n), x="k-mer", y="Count",
-                               title=f"Top {n} {k}-mers"),
-                        use_container_width=True)
-        st.dataframe(kt, use_container_width=True, hide_index=True)
-
-    st.markdown("#### Codon usage")
-    cu = codon_usage(seq)
-    if not cu.empty:
-        st.plotly_chart(px.bar(cu, x="Codon", y="Count", title="Codon usage"),
-                        use_container_width=True)
-        st.dataframe(cu, use_container_width=True, hide_index=True)
-    else:
-        st.info("Codon usage requires an unambiguous DNA sequence.")
-
-    st.markdown("#### Restriction-site screening")
-    st.dataframe(restriction_sites(seq), use_container_width=True, hide_index=True)
-
-    st.markdown("#### Oligonucleotide Wallace-rule Tm")
-    oligo = st.text_input("DNA oligo", value=seq[:20], key="oligo")
-    clean_oligo = clean_sequence(oligo)
-    if clean_oligo and set(clean_oligo) <= set("ATGC"):
-        tm = 2 * (clean_oligo.count("A") + clean_oligo.count("T")) + 4 * (clean_oligo.count("G") + clean_oligo.count("C"))
-        st.metric("Estimated Tm", f"{tm:.1f} °C")
-        st.caption("Simple Wallace-rule estimate; not a full thermodynamic primer-design calculation.")
-
-
-# ============================================================
-# Automated report tab
-# ============================================================
-
-with tab_report:
-    st.subheader("Automated Analysis Report")
-    total_bases = int(df["Length (bp)"].sum())
-    mean_len = df["Length (bp)"].mean()
-    mean_gc = valid_df["GC %"].mean() if not valid_df.empty else np.nan
-
-    report = f"""MULTI-FASTA SEQUENCE ANALYSIS REPORT
+def kmer_table(seq,k):
+    s=clean_sequence(seq)
+    if len(s)<k:return pd.DataFrame(columns=["k-mer","Count","Frequency (%)"])
+    counts=Counter(s[i:i+k] for i in range(len(s)-k+1)); total=sum(counts.values())
+    return pd.DataFrame([{"k-mer":x,"Count":n,"Frequency (%)":100*n/total} for x,n in counts.most_common()])
+
+def motif_positions(seq,pattern):
+    try:return [m.start()+1 for m in re.finditer(f"(?={pattern.strip().upper()})",clean_sequence(seq))]
+    except re.error:return []
+
+def codon_usage(seq):
+    s=clean_sequence(seq)
+    if not s or set(s)-DNA:return pd.DataFrame(columns=["Codon","Count","Frequency (%)"])
+    codons=[s[i:i+3] for i in range(0,len(s)-2,3)]
+    counts=Counter(codons); total=sum(counts.values())
+    return pd.DataFrame([{"Codon":x,"Count":n,"Frequency (%)":100*n/total} for x,n in counts.most_common()])
+
+def restriction_table(seq):
+    s=clean_sequence(seq); rows=[]
+    for enzyme,site in RESTRICTION_ENZYMES.items():
+        pos=[m.start()+1 for m in re.finditer(f"(?={site})",s)]
+        rows.append({"Enzyme":enzyme,"Recognition site":site,"Sites":len(pos),
+                     "Positions":", ".join(map(str,pos[:100])) or "None"})
+    return pd.DataFrame(rows)
+
+def longest_orf(seq,min_aa=0):
+    s=clean_sequence(seq)
+    if set(s)-DNA:return None
+    best=None
+    for frame in range(3):
+        start=None
+        for i in range(frame,len(s)-2,3):
+            codon=s[i:i+3]
+            if start is None and codon=="ATG":start=i
+            elif start is not None and codon in STOP_CODONS:
+                aa=(i-start)//3
+                if aa>=min_aa and (best is None or aa>best["AA length"]):
+                    frag=s[start:i+3]
+                    best={"Frame":frame+1,"Start":start+1,"Stop":i+3,
+                          "NT length":len(frag),"AA length":aa,
+                          "Protein":str(Seq(frag).translate(to_stop=True))}
+                start=None
+    return best
+
+def six_frame_translation(seq):
+    s=clean_sequence(seq)
+    if set(s)-DNA:return pd.DataFrame()
+    rows=[]
+    for strand,dna in [("+",s),("-",str(Seq(s).reverse_complement()))]:
+        for frame in range(3):
+            p=str(Seq(dna[frame:]).translate(to_stop=False))
+            rows.append({"Strand":strand,"Frame":f"{strand}{frame+1}","AA length":len(p),"Translation":p})
+    return pd.DataFrame(rows)
+
+def position_composition(records):
+    max_len=max((len(clean_sequence(r.seq)) for r in records),default=0); rows=[]
+    for pos in range(max_len):
+        b=[clean_sequence(r.seq)[pos] for r in records if pos<len(clean_sequence(r.seq))]
+        if b:
+            n=len(b); rows.append({"Position":pos+1,"A %":100*b.count("A")/n,
+                                   "T %":100*b.count("T")/n,"G %":100*b.count("G")/n,
+                                   "C %":100*b.count("C")/n})
+    return pd.DataFrame(rows)
+
+def build_dataframe(records):
+    rows=[]
+    for r in records:
+        s=clean_sequence(r.seq); a,t,g,c=[s.count(x) for x in "ATGC"]; score,flags=quality_score(s)
+        hpbase,hplen=longest_homopolymer(s)
+        rows.append({"ID":r.id,"Description":r.description,"Type":detect_type(s),"Length":len(s),
+                     "A":a,"T":t,"G":g,"C":c,"GC %":round(gc_percent(s),3),"AT %":round(at_percent(s),3),
+                     "GC Skew":round(gc_skew(s),5),"AT Skew":round(at_skew(s),5),
+                     "Entropy":round(shannon_entropy(s),5),"Unique symbols":len(set(s)),
+                     "Ambiguous bases":ambiguous_count(s),"GC Class":gc_class(gc_percent(s)),
+                     "Longest homopolymer":f"{hpbase}{hplen}","QC Score":score,
+                     "QC Status":"PASS" if score>=90 else ("REVIEW" if score>=70 else "FAIL"),
+                     "QC Flags":"; ".join(flags)})
+    return pd.DataFrame(rows)
+
+def normalized_fasta(records):
+    out=io.StringIO()
+    for r in records:
+        s=clean_sequence(r.seq);out.write(f">{r.description}\n")
+        for i in range(0,len(s),80):out.write(s[i:i+80]+"\n")
+    return out.getvalue().encode()
+
+def make_report(df):
+    return f"""MULTI-FASTA SEQUENCE ANALYSIS REPORT
 ====================================
 
-Dataset
--------
-Total sequences: {len(df)}
-Total bases: {total_bases:,}
-Mean sequence length: {mean_len:,.2f} bp
-Minimum length: {int(df['Length (bp)'].min())} bp
-Maximum length: {int(df['Length (bp)'].max())} bp
-Mean GC%: {mean_gc:.2f}%
+Sequences: {len(df)}
+Total bases/nt: {int(df["Length"].sum()):,}
+Mean length: {df["Length"].mean():,.2f}
+Minimum length: {int(df["Length"].min()) if len(df) else 0}
+Maximum length: {int(df["Length"].max()) if len(df) else 0}
+Mean GC%: {df["GC %"].mean():.2f}%
 
-Classification
+Sequence types
 --------------
-{df['Classification'].value_counts().to_string()}
+{df["Type"].value_counts().to_string()}
 
-Quality Control
+Quality control
 ---------------
-Mean QC score: {qc_df['Quality Score'].mean():.1f}/100
-PASS: {(qc_df['QC Status'] == 'PASS').sum()}
-REVIEW: {(qc_df['QC Status'] == 'REVIEW').sum()}
-FAIL: {(qc_df['QC Status'] == 'FAIL').sum()}
+Mean QC score: {df["QC Score"].mean():.2f}/100
+PASS: {(df["QC Status"]=="PASS").sum()}
+REVIEW: {(df["QC Status"]=="REVIEW").sum()}
+FAIL: {(df["QC Status"]=="FAIL").sum()}
 
-Interpretation note
--------------------
-QC indicators are screening metrics. Biological interpretation should consider
-organism, genomic region, sequencing platform, assembly quality and study design.
+Interpretation note:
+QC scores are computational screening indicators, not laboratory acceptance
+criteria. Interpret results in the biological and sequencing context.
 """
-    st.text_area("Report preview", report, height=450)
-    st.download_button("⬇️ Download report", report.encode("utf-8"),
-                       file_name="multi_fasta_analysis_report.txt",
-                       mime="text/plain", use_container_width=True)
 
-    report_table = pd.DataFrame({
-        "Metric": ["Sequences", "Total bases", "Mean length", "Mean GC%", "Mean QC score"],
-        "Value": [len(df), total_bases, round(mean_len, 2), round(mean_gc, 2),
-                  round(qc_df["Quality Score"].mean(), 2)]
-    })
-    st.dataframe(report_table, use_container_width=True, hide_index=True)
+# Input
+if "records" not in st.session_state: st.session_state.records=[]
+with st.sidebar:
+    st.header("📂 FASTA Manager")
+    uploaded=st.file_uploader("Upload FASTA file(s)",type=["fasta","fa","fas","fna","ffn","faa"],accept_multiple_files=True)
+    if st.button("Clear dataset",use_container_width=True):
+        st.session_state.records=[];st.rerun()
+    st.divider()
+    st.caption("Research Analysis Suite")
+    st.caption("QC • composition • ORF • motifs • k-mers • reports")
 
+    if uploaded:
+        parsed=[];errors=[]
+        for f in uploaded:
+            try:
+                raw=f.getvalue().decode("utf-8",errors="replace")
+                rs=list(SeqIO.parse(io.StringIO(raw),"fasta"))
+                for r in rs:
+                    r.id=f"{f.name}:{r.id}";r.description=f"{f.name} | {r.description}"
+                parsed.extend(rs)
+            except Exception as exc: errors.append(f"{f.name}: {exc}")
+        if errors: st.error("\n".join(errors))
+        elif parsed: st.session_state.records=parsed
 
-# ============================================================
-# Downloads tab
-# ============================================================
+records=st.session_state.records
+if not records:
+    sample=Path(__file__).with_name("sample_sequences.fasta")
+    if sample.exists():
+        try: records=list(SeqIO.parse(str(sample),"fasta"));st.session_state.records=records
+        except Exception: records=[]
+if not records:
+    st.info("Upload a FASTA file to begin.");st.stop()
 
-with tab_download:
-    st.subheader("Download analysis results")
+df=build_dataframe(records)
 
-    summary = pd.DataFrame(
-        {
-            "Statistic": [
-                "Total sequences",
-                "Total base pairs",
-                "Average sequence length",
-                "Average GC%",
-                "Minimum GC%",
-                "Maximum GC%",
-                "Total invalid bases",
-            ],
-            "Value": [
-                total_sequences,
-                total_bp,
-                round(average_length, 2),
-                round(average_gc, 2) if not np.isnan(average_gc) else None,
-                round(min_gc, 2) if not np.isnan(min_gc) else None,
-                round(max_gc, 2) if not np.isnan(max_gc) else None,
-                int(df["Invalid Bases"].sum()),
-            ],
-        }
-    )
+m1,m2,m3,m4,m5,m6=st.columns(6)
+m1.metric("Sequences",f"{len(df):,}");m2.metric("Total bases",f"{int(df['Length'].sum()):,}")
+m3.metric("Mean length",f"{df['Length'].mean():,.0f}");m4.metric("Mean GC%",f"{df['GC %'].mean():.2f}%")
+m5.metric("PASS QC",f"{(df['QC Status']=='PASS').sum():,}");m6.metric("Needs review",f"{(df['QC Status']!='PASS').sum():,}")
 
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    excel_bytes = make_excel(df, summary)
-    fasta_bytes = make_fasta(records)
+tabs=st.tabs(["🏠 Dashboard","🧾 Sequence Table","📈 Charts","🧹 Research QC","🔬 Sliding Analysis",
+              "🧬 ORF & Translation","🧪 Motif Lab","🔢 k-mer & Codon","🧫 Restriction Sites",
+              "🧪 Primer Lab","🔎 Compare","📄 Report","⬇️ Export"])
 
-    st.download_button(
-        "⬇️ Download CSV",
-        data=csv_bytes,
-        file_name="multi_fasta_analysis.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+with tabs[0]:
+    st.subheader("Dataset Dashboard")
+    c1,c2=st.columns(2)
+    with c1: st.plotly_chart(px.histogram(df,x="Length",nbins=min(30,max(5,len(df))),title="Sequence Length Distribution"),use_container_width=True)
+    with c2: st.plotly_chart(px.histogram(df,x="GC %",nbins=20,title="GC% Distribution"),use_container_width=True)
+    summary=pd.DataFrame({"Metric":["Sequences","Total bases","Minimum length","Maximum length","Mean length","Median length","Mean GC%","Mean entropy"],
+                          "Value":[len(df),int(df["Length"].sum()),int(df["Length"].min()),int(df["Length"].max()),
+                                   round(df["Length"].mean(),2),round(df["Length"].median(),2),round(df["GC %"].mean(),2),round(df["Entropy"].mean(),4)]})
+    st.dataframe(summary,use_container_width=True,hide_index=True)
+    types=df["Type"].value_counts().rename_axis("Type").reset_index(name="Count")
+    st.plotly_chart(px.pie(types,names="Type",values="Count",title="Detected Sequence Types"),use_container_width=True)
 
-    st.download_button(
-        "📊 Download Excel",
-        data=excel_bytes,
-        file_name="multi_fasta_analysis.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+with tabs[1]:
+    st.subheader("Detailed Sequence Table")
+    query=st.text_input("Search ID or description")
+    lo,hi=int(df["Length"].min()),int(df["Length"].max())
+    filtered=df.copy()
+    if lo<hi:
+        rng=st.slider("Length range",lo,hi,(lo,hi));filtered=filtered[filtered["Length"].between(*rng)]
+    if query:
+        mask=filtered["ID"].str.contains(query,case=False,na=False)|filtered["Description"].str.contains(query,case=False,na=False)
+        filtered=filtered[mask]
+    st.dataframe(filtered,use_container_width=True,hide_index=True)
+    sid=st.selectbox("Inspect sequence",list(df["ID"]))
+    rec=next(r for r in records if r.id==sid);st.code(clean_sequence(rec.seq),language="text")
 
-    st.download_button(
-        "🧬 Download normalized FASTA",
-        data=fasta_bytes,
-        file_name="normalized_sequences.fasta",
-        mime="text/plain",
-        use_container_width=True,
-    )
+with tabs[2]:
+    st.subheader("Interactive Visualization Studio")
+    c1,c2=st.columns(2)
+    with c1:
+        fig=px.bar(df,x="ID",y="GC %",title="GC% by Sequence");fig.update_layout(xaxis_tickangle=-45);st.plotly_chart(fig,use_container_width=True)
+    with c2: st.plotly_chart(px.scatter(df,x="Length",y="GC %",hover_name="ID",title="Length vs GC%"),use_container_width=True)
+    comp=df.melt(id_vars="ID",value_vars=["A","T","G","C"],var_name="Base",value_name="Count")
+    st.plotly_chart(px.bar(comp,x="ID",y="Count",color="Base",barmode="group",title="A/T/G/C Counts"),use_container_width=True)
+    corr=df.select_dtypes(include=np.number).corr().round(3)
+    st.dataframe(corr,use_container_width=True)
+    st.plotly_chart(px.imshow(corr,text_auto=True,aspect="auto",title="Feature Correlation Matrix"),use_container_width=True)
+    pos=position_composition(records)
+    if not pos.empty: st.plotly_chart(px.line(pos,x="Position",y=["A %","T %","G %","C %"],title="Position-wise Base Composition"),use_container_width=True)
 
-    st.markdown("### Output contents")
-    st.write(
-        "The CSV/Excel output contains sequence ID, description, length, "
-        "A/T/G/C counts, GC%, AT%, GC skew, AT skew, valid bases, invalid bases "
-        "and GC classification."
-    )
+with tabs[3]:
+    st.subheader("Research Quality Control")
+    q1,q2,q3,q4=st.columns(4)
+    q1.metric("Mean score",f"{df['QC Score'].mean():.1f}/100");q2.metric("PASS",int((df["QC Status"]=="PASS").sum()))
+    q3.metric("REVIEW",int((df["QC Status"]=="REVIEW").sum()));q4.metric("FAIL",int((df["QC Status"]=="FAIL").sum()))
+    st.dataframe(df[["ID","Length","Ambiguous bases","Longest homopolymer","Entropy","QC Score","QC Status","QC Flags"]],
+                 use_container_width=True,hide_index=True)
+    st.plotly_chart(px.bar(df,x="ID",y="QC Score",title="Per-sequence QC Score"),use_container_width=True)
+    st.plotly_chart(px.imshow(df.set_index("ID")[["A","T","G","C"]].T,text_auto=True,aspect="auto",title="Nucleotide Count Heatmap"),use_container_width=True)
 
+with tabs[4]:
+    st.subheader("Sliding-Window Analysis")
+    sid=st.selectbox("Sequence",list(df["ID"]),key="slide")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    if len(seq)<5: st.warning("Sequence is too short.")
+    else:
+        window=st.number_input("Window size",5,len(seq),min(100,len(seq)),5)
+        metric=st.selectbox("Metric",["GC %","GC Skew","AT Skew","Entropy"])
+        wdf=sliding_metric(seq,int(window),metric)
+        st.plotly_chart(px.line(wdf,x="Position",y=metric,title=f"Sliding {metric} — window {window}"),use_container_width=True)
+        st.dataframe(wdf.head(2000),use_container_width=True,hide_index=True)
 
-# ============================================================
-# Footer
-# ============================================================
+with tabs[5]:
+    st.subheader("ORF Screening & Translation")
+    sid=st.selectbox("DNA sequence",list(df["ID"]),key="orf")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    minimum=st.number_input("Minimum ORF length (aa)",0,10000,20,5)
+    if set(seq)<=DNA:
+        result=longest_orf(seq,int(minimum))
+        if result:
+            st.success(f"Longest ORF: {result['AA length']} aa, frame +{result['Frame']}, positions {result['Start']}–{result['Stop']}.")
+            st.code(result["Protein"],language="text")
+            st.dataframe(pd.DataFrame([{k:v for k,v in result.items() if k!="Protein"}]),use_container_width=True,hide_index=True)
+        else: st.info("No ORF met the selected threshold.")
+        st.dataframe(six_frame_translation(seq),use_container_width=True,hide_index=True)
+    else: st.warning("ORF analysis requires A/C/G/T only.")
 
-st.divider()
-st.caption(
-    "Multi-FASTA Sequence Analyzer • Python • Biopython • Pandas • Plotly • SciPy"
-)
+with tabs[6]:
+    st.subheader("Motif & Pattern Laboratory")
+    sid=st.selectbox("Sequence",list(df["ID"]),key="motif")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    motifs=st.text_area("Motifs separated by commas","ATG, TATA, GAATTC")
+    rows=[]
+    for motif in [x.strip().upper() for x in motifs.split(",") if x.strip()]:
+        pos=motif_positions(seq,motif)
+        rows.append({"Motif":motif,"Length":len(motif),"Hits":len(pos),"First positions":", ".join(map(str,pos[:20])) or "None"})
+    mdf=pd.DataFrame(rows)
+    if not mdf.empty:
+        st.dataframe(mdf,use_container_width=True,hide_index=True)
+        st.plotly_chart(px.bar(mdf,x="Motif",y="Hits",title="Motif Abundance"),use_container_width=True)
+
+with tabs[7]:
+    st.subheader("k-mer & Codon Analytics")
+    sid=st.selectbox("Sequence",list(df["ID"]),key="kmer")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    k=st.selectbox("k-mer size",[2,3,4,5,6],index=1)
+    kt=kmer_table(seq,int(k))
+    if not kt.empty:
+        top=st.slider("Top k-mers",5,min(50,len(kt)),min(20,len(kt)))
+        st.plotly_chart(px.bar(kt.head(top),x="k-mer",y="Count",title=f"Top {top} {k}-mers"),use_container_width=True)
+        st.dataframe(kt,use_container_width=True,hide_index=True)
+    cu=codon_usage(seq)
+    if not cu.empty:
+        st.plotly_chart(px.bar(cu,x="Codon",y="Count",title="Codon Usage"),use_container_width=True)
+        st.dataframe(cu,use_container_width=True,hide_index=True)
+    else: st.info("Codon usage requires an unambiguous DNA sequence.")
+
+with tabs[8]:
+    st.subheader("Restriction-Site Screening")
+    sid=st.selectbox("DNA sequence",list(df["ID"]),key="restriction")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    if set(seq)<=DNA:
+        rdf=restriction_table(seq);st.dataframe(rdf,use_container_width=True,hide_index=True)
+        st.plotly_chart(px.bar(rdf,x="Enzyme",y="Sites",title="Restriction Sites Detected"),use_container_width=True)
+    else: st.warning("Requires A/C/G/T only.")
+
+with tabs[9]:
+    st.subheader("Primer / Oligonucleotide Screening")
+    sid=st.selectbox("Reference sequence",list(df["ID"]),key="primer")
+    seq=clean_sequence(next(r for r in records if r.id==sid).seq)
+    oligo=clean_sequence(st.text_input("DNA oligo",seq[:20]))
+    gmin,gmax=st.slider("Preferred GC range (%)",0,100,(40,60))
+    if oligo:
+        if set(oligo)<=DNA:
+            a,t,g,c=[oligo.count(x) for x in "ATGC"];gc=100*(g+c)/len(oligo)
+            tm=2*(a+t)+4*(g+c);hb,hl=longest_homopolymer(oligo)
+            p1,p2,p3,p4=st.columns(4);p1.metric("Length",f"{len(oligo)} nt");p2.metric("GC%",f"{gc:.1f}%")
+            p3.metric("Wallace Tm",f"{tm:.1f} °C");p4.metric("GC target","PASS" if gmin<=gc<=gmax else "REVIEW")
+            warnings=[]
+            if len(oligo)<15 or len(oligo)>35:warnings.append("Length outside common screening range.")
+            if not gmin<=gc<=gmax:warnings.append("GC% outside selected range.")
+            if hl>=5:warnings.append(f"Homopolymer detected: {hb}{hl}.")
+            if warnings:
+                for w in warnings:st.warning(w)
+            else:st.success("No screening warnings.")
+            st.caption("Wallace-rule Tm is an approximate screening value.")
+        else:st.error("Use A/C/G/T only.")
+
+with tabs[10]:
+    st.subheader("Comparative Sequence Analysis")
+    chosen=st.multiselect("Select sequences",list(df["ID"]),default=list(df["ID"])[:min(5,len(df))])
+    if chosen:
+        cdf=df[df["ID"].isin(chosen)].copy();metrics=["Length","GC %","AT %","GC Skew","AT Skew","Entropy","QC Score"]
+        metric=st.selectbox("Comparison metric",metrics)
+        st.dataframe(cdf[["ID"]+metrics].round(4),use_container_width=True,hide_index=True)
+        fig=px.bar(cdf,x="ID",y=metric,title=f"Comparison — {metric}");fig.update_layout(xaxis_tickangle=-45);st.plotly_chart(fig,use_container_width=True)
+        long=cdf.melt(id_vars="ID",value_vars=["A","T","G","C"],var_name="Base",value_name="Count")
+        st.plotly_chart(px.bar(long,x="ID",y="Count",color="Base",barmode="group",title="Base Composition Comparison"),use_container_width=True)
+
+with tabs[11]:
+    st.subheader("Automated Research Report")
+    report=make_report(df);st.text_area("Report preview",report,height=430)
+    st.download_button("⬇️ Download report",report.encode(),file_name="multi_fasta_analysis_report.txt",mime="text/plain",use_container_width=True)
+
+with tabs[12]:
+    st.subheader("Export Center")
+    st.download_button("⬇️ CSV",df.to_csv(index=False).encode(),file_name="sequence_statistics.csv",mime="text/csv",use_container_width=True)
+    st.download_button("⬇️ Normalized FASTA",normalized_fasta(records),file_name="normalized_sequences.fasta",mime="text/plain",use_container_width=True)
+    xbuf=io.BytesIO()
+    with pd.ExcelWriter(xbuf,engine="openpyxl") as writer:
+        df.to_excel(writer,sheet_name="Statistics",index=False)
+        df[["ID","Length","Ambiguous bases","Entropy","QC Score","QC Status","QC Flags"]].to_excel(writer,sheet_name="QC",index=False)
+        df[["ID","A","T","G","C","GC %","AT %","GC Skew","AT Skew"]].to_excel(writer,sheet_name="Composition",index=False)
+    st.download_button("⬇️ Excel workbook",xbuf.getvalue(),file_name="multi_fasta_analysis.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+
+st.markdown('<div class="muted" style="text-align:center;margin-top:2rem;">Multi-FASTA Sequence Analyzer • Computational screening and research analytics</div>',unsafe_allow_html=True)
