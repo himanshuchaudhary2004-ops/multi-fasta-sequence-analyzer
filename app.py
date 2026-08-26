@@ -11,7 +11,6 @@ import plotly.express as px
 import streamlit as st
 from Bio import SeqIO
 from Bio.Seq import Seq
-from Bio import Align
 from Bio.Align import PairwiseAligner
 
 st.set_page_config(page_title="Multi-FASTA Sequence Analyzer", page_icon="🧬", layout="wide")
@@ -204,7 +203,9 @@ def six_frame_translation(seq):
     rows=[]
     for strand,dna in [("+",s),("-",str(Seq(s).reverse_complement()))]:
         for frame in range(3):
-            p=str(Seq(dna[frame:]).translate(to_stop=False))
+            frame_seq = dna[frame:]
+            frame_seq = frame_seq[:len(frame_seq) - (len(frame_seq) % 3)]
+            p = str(Seq(frame_seq).translate(to_stop=False))
             rows.append({"Strand":strand,"Frame":f"{strand}{frame+1}","AA length":len(p),"Translation":p})
     return pd.DataFrame(rows)
 
@@ -791,27 +792,30 @@ with tabs[11]:
 with tabs[12]:
     st.subheader("Variant / SNP Comparison")
     st.markdown('<div class="section-note">Screen nucleotide differences between a reference and query sequence.</div>', unsafe_allow_html=True)
-    ref_id = st.selectbox("Reference sequence", list(df["ID"]), key="variant_ref")
-    qry_id = st.selectbox("Query sequence", [x for x in df["ID"] if x != ref_id],
-                          key="variant_query")
-    ref_seq = clean_sequence(next(r for r in records if r.id == ref_id).seq)
-    qry_seq = clean_sequence(next(r for r in records if r.id == qry_id).seq)
-    vdf = variant_table(ref_seq, qry_seq)
-    a, b, c = st.columns(3)
-    a.metric("Differences", len(vdf))
-    b.metric("Reference length", len(ref_seq))
-    c.metric("Query length", len(qry_seq))
-    if vdf.empty:
-        st.success("No differences detected in the overlapping sequence region.")
+    if len(records) < 2:
+        st.info("At least two sequences are required for variant comparison.")
     else:
-        st.dataframe(vdf, use_container_width=True, hide_index=True)
-        st.plotly_chart(px.histogram(vdf, x="Position", nbins=min(30, max(5, len(vdf))),
-                                     title="Variant positions"),
-                        use_container_width=True)
-        st.download_button("⬇️ Download variants CSV",
-                           vdf.to_csv(index=False).encode(),
-                           file_name="sequence_variants.csv",
-                           mime="text/csv", use_container_width=True)
+        ref_id = st.selectbox("Reference sequence", list(df["ID"]), key="variant_ref")
+        qry_id = st.selectbox("Query sequence", [x for x in df["ID"] if x != ref_id],
+                              key="variant_query")
+        ref_seq = clean_sequence(next(r for r in records if r.id == ref_id).seq)
+        qry_seq = clean_sequence(next(r for r in records if r.id == qry_id).seq)
+        vdf = variant_table(ref_seq, qry_seq)
+        a, b, c = st.columns(3)
+        a.metric("Differences", len(vdf))
+        b.metric("Reference length", len(ref_seq))
+        c.metric("Query length", len(qry_seq))
+        if vdf.empty:
+            st.success("No differences detected in the overlapping sequence region.")
+        else:
+            st.dataframe(vdf, use_container_width=True, hide_index=True)
+            st.plotly_chart(px.histogram(vdf, x="Position", nbins=min(30, max(5, len(vdf))),
+                                         title="Variant positions"),
+                            use_container_width=True)
+            st.download_button("⬇️ Download variants CSV",
+                               vdf.to_csv(index=False).encode(),
+                               file_name="sequence_variants.csv",
+                               mime="text/csv", use_container_width=True)
 
 
 with tabs[13]:
