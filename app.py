@@ -11,23 +11,63 @@ import plotly.express as px
 import streamlit as st
 from Bio import SeqIO
 from Bio.Seq import Seq
+from Bio import Align
+from Bio.Align import PairwiseAligner
 
 st.set_page_config(page_title="Multi-FASTA Sequence Analyzer", page_icon="🧬", layout="wide")
 
 st.markdown("""
 <style>
-.block-container{padding-top:1.1rem;padding-bottom:2rem}
-.hero{padding:1.4rem 1.6rem;border-radius:18px;border:1px solid rgba(120,120,120,.2);
-background:linear-gradient(135deg,rgba(45,95,170,.12),rgba(55,170,135,.10));margin-bottom:1rem}
-.hero h1{margin:0;font-size:2.1rem}.hero p{margin:.45rem 0 0;opacity:.76}
-[data-testid="stMetric"]{border:1px solid rgba(120,120,120,.16);padding:.6rem;border-radius:12px}
-.muted{opacity:.68;font-size:.86rem}
+.block-container{max-width:1480px;padding-top:.8rem;padding-bottom:3rem}
+.hero{position:relative;overflow:hidden;padding:1.8rem 1.9rem;border-radius:24px;
+border:1px solid rgba(100,120,150,.20);
+background:radial-gradient(circle at 88% 18%,rgba(75,150,235,.20),transparent 32%),
+radial-gradient(circle at 12% 100%,rgba(45,180,145,.13),transparent 30%),
+linear-gradient(135deg,rgba(35,75,145,.13),rgba(35,170,135,.08));
+box-shadow:0 18px 50px rgba(20,35,60,.08);margin-bottom:1rem}
+.hero h1{margin:0;font-size:2.45rem;letter-spacing:-.04em;font-weight:800}
+.hero p{margin:.55rem 0 0;opacity:.72;font-size:1rem;max-width:900px}
+.hero-badges{margin-top:1rem;display:flex;gap:.45rem;flex-wrap:wrap}
+.badge{padding:.32rem .65rem;border-radius:999px;border:1px solid rgba(100,120,150,.18);
+background:rgba(255,255,255,.38);font-size:.74rem}
+[data-testid="stMetric"]{border:1px solid rgba(100,120,150,.16);border-radius:16px;
+padding:.85rem .9rem;box-shadow:0 7px 22px rgba(20,35,60,.055)}
+[data-testid="stMetricValue"]{font-weight:780;letter-spacing:-.02em}
+[data-testid="stMetricLabel"]{font-size:.76rem}
+div[data-baseweb="tab-list"]{gap:.2rem;border-bottom:1px solid rgba(100,120,150,.14);padding-bottom:.3rem}
+button[data-baseweb="tab"]{border-radius:11px 11px 0 0;padding:.58rem .78rem;font-weight:600}
+button[data-baseweb="tab"] p{font-size:.82rem}
+.stButton>button,.stDownloadButton>button{border-radius:12px;font-weight:650;min-height:2.55rem}
+div[data-testid="stDataFrame"]{border-radius:13px;overflow:hidden}
+div[data-testid="stPlotlyChart"]{border:1px solid rgba(100,120,150,.10);border-radius:14px;padding:.25rem}
+.section-note{opacity:.62;font-size:.84rem;margin:-.25rem 0 .9rem}
+.panel{border:1px solid rgba(100,120,150,.14);border-radius:16px;padding:1rem;
+background:rgba(100,120,150,.025);margin:.35rem 0 .8rem}
+.panel-title{font-weight:720;font-size:1rem;margin-bottom:.3rem}
+.panel-text{opacity:.66;font-size:.82rem}
+.sidebar-brand{border:1px solid rgba(100,120,150,.16);border-radius:15px;padding:.9rem;
+background:linear-gradient(135deg,rgba(50,100,180,.08),rgba(50,170,140,.06));margin-bottom:.8rem}
+.sidebar-brand .title{font-weight:780;font-size:1.08rem}
+.sidebar-brand .sub{opacity:.62;font-size:.76rem;margin-top:.2rem}
+.muted{opacity:.60;font-size:.8rem}
+.footer{margin-top:2.8rem;padding:1.2rem 0;border-top:1px solid rgba(100,120,150,.14);text-align:center}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""<div class="hero"><h1>🧬 Multi-FASTA Sequence Analyzer</h1>
-<p>Professional FASTA QC, sequence statistics, visualization, ORF screening, motif,
-k-mer, codon, restriction-site, primer and comparative analysis.</p></div>""", unsafe_allow_html=True)
+st.markdown("""
+<div class="hero">
+  <h1>🧬 Multi-FASTA Sequence Analyzer</h1>
+  <p>A polished research workspace for FASTA QC, sequence composition, alignment,
+  comparative genomics, variant screening, phylogenetic clustering, protein analysis
+  and publication-oriented exports.</p>
+  <div class="hero-badges">
+    <span class="badge">FASTA QC</span><span class="badge">Sequence Analytics</span>
+    <span class="badge">MSA & Consensus</span><span class="badge">Variants</span>
+    <span class="badge">Phylogeny</span><span class="badge">Protein Lab</span>
+    <span class="badge">Research Export</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 DNA=set("ATGC")
 RNA=set("AUGC")
@@ -227,6 +267,292 @@ QC scores are computational screening indicators, not laboratory acceptance
 criteria. Interpret results in the biological and sequencing context.
 """
 
+
+# ============================================================
+# Advanced alignment / comparative helpers
+# ============================================================
+
+def reverse_complement(seq):
+    s = clean_sequence(seq)
+    return str(Seq(s).reverse_complement())
+
+
+def dna_to_rna(seq):
+    return clean_sequence(seq).replace("T", "U")
+
+
+def rna_to_dna(seq):
+    return clean_sequence(seq).replace("U", "T")
+
+
+def pairwise_alignment(seq1, seq2, match=2, mismatch=-1, gap_open=-2, gap_extend=-0.5):
+    a = PairwiseAligner()
+    a.mode = "global"
+    a.match_score = match
+    a.mismatch_score = mismatch
+    a.open_gap_score = gap_open
+    a.extend_gap_score = gap_extend
+    return a.align(clean_sequence(seq1), clean_sequence(seq2))
+
+
+def alignment_identity(aln):
+    # Works with Biopython PairwiseAlignment objects.
+    target = str(aln.target)
+    query = str(aln.query)
+    length = min(len(target), len(query))
+    matches = sum(a == b and a != "-" for a, b in zip(target[:length], query[:length]))
+    return 100.0 * matches / length if length else 0.0
+
+
+def simple_global_align_many(sequences):
+    """
+    Lightweight progressive MSA for small educational/research datasets.
+    Uses pairwise global alignment against the first sequence and projects
+    gaps into a common coordinate system.
+    """
+    if not sequences:
+        return []
+    seqs = [clean_sequence(s) for s in sequences]
+    if len(seqs) == 1:
+        return seqs
+
+    reference = seqs[0]
+    aligner = PairwiseAligner()
+    aligner.mode = "global"
+    aligner.match_score = 2
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -2
+    aligner.extend_gap_score = -0.5
+
+    # Start from reference columns.
+    aligned = [reference]
+    for seq in seqs[1:]:
+        aln = aligner.align(reference, seq)[0]
+        # Build gapped strings from alignment blocks.
+        ref_str = []
+        seq_str = []
+        ref_pos = seq_pos = 0
+        for (r0, r1), (q0, q1) in zip(aln.aligned[0], aln.aligned[1]):
+            while ref_pos < r0:
+                ref_str.append(reference[ref_pos])
+                seq_str.append("-")
+                ref_pos += 1
+            while seq_pos < q0:
+                ref_str.append("-")
+                seq_str.append(seq[seq_pos])
+                seq_pos += 1
+            ref_str.extend(reference[r0:r1])
+            seq_str.extend(seq[q0:q1])
+            ref_pos = r1
+            seq_pos = q1
+        while ref_pos < len(reference):
+            ref_str.append(reference[ref_pos])
+            seq_str.append("-")
+            ref_pos += 1
+        while seq_pos < len(seq):
+            ref_str.append("-")
+            seq_str.append(seq[seq_pos])
+            seq_pos += 1
+
+        new_ref = "".join(ref_str)
+        new_aligned = []
+        # Project existing rows into new reference coordinates.
+        for old in aligned:
+            oi = 0
+            projected = []
+            for ch in new_ref:
+                if ch == "-":
+                    projected.append("-")
+                else:
+                    projected.append(old[oi] if oi < len(old) else "-")
+                    oi += 1
+            new_aligned.append("".join(projected))
+        aligned = new_aligned + [seq_str]
+        reference = new_ref
+
+    return aligned
+
+
+def consensus_from_alignment(aligned):
+    if not aligned:
+        return ""
+    max_len = max(len(s) for s in aligned)
+    out = []
+    for i in range(max_len):
+        column = [s[i] if i < len(s) else "-" for s in aligned]
+        bases = [b for b in column if b != "-"]
+        if not bases:
+            out.append("-")
+            continue
+        counts = Counter(bases)
+        out.append(counts.most_common(1)[0][0])
+    return "".join(out)
+
+
+def conservation_table(aligned):
+    if not aligned:
+        return pd.DataFrame()
+    width = max(len(s) for s in aligned)
+    rows = []
+    for i in range(width):
+        col = [s[i] if i < len(s) else "-" for s in aligned]
+        nongap = [b for b in col if b != "-"]
+        if nongap:
+            counts = Counter(nongap)
+            majority = counts.most_common(1)[0][0]
+            conservation = 100 * counts[majority] / len(nongap)
+            entropy = -sum((n/len(nongap))*math.log2(n/len(nongap))
+                           for n in counts.values())
+        else:
+            majority, conservation, entropy = "-", 0.0, 0.0
+        rows.append({
+            "Position": i + 1,
+            "Consensus": majority,
+            "Conservation %": conservation,
+            "Entropy": entropy,
+            "Gaps": col.count("-"),
+        })
+    return pd.DataFrame(rows)
+
+
+def pairwise_distance_matrix(records):
+    ids = [r.id for r in records]
+    seqs = [clean_sequence(r.seq) for r in records]
+    matrix = pd.DataFrame(0.0, index=ids, columns=ids)
+    for i in range(len(seqs)):
+        for j in range(i + 1, len(seqs)):
+            a, b = seqs[i], seqs[j]
+            n = min(len(a), len(b))
+            mismatches = sum(x != y for x, y in zip(a[:n], b[:n]))
+            denominator = n if n else 1
+            d = mismatches / denominator
+            matrix.iloc[i, j] = d
+            matrix.iloc[j, i] = d
+    return matrix
+
+
+def variant_table(reference, query):
+    a = clean_sequence(reference)
+    b = clean_sequence(query)
+    n = min(len(a), len(b))
+    rows = []
+    for i in range(n):
+        if a[i] != b[i]:
+            rows.append({
+                "Position": i + 1,
+                "Reference": a[i],
+                "Query": b[i],
+                "Change": f"{a[i]}>{b[i]}",
+            })
+    if len(a) != len(b):
+        longer = a if len(a) > len(b) else b
+        label = "Reference" if len(a) > len(b) else "Query"
+        for i in range(n, len(longer)):
+            rows.append({
+                "Position": i + 1,
+                "Reference": a[i] if i < len(a) else "-",
+                "Query": b[i] if i < len(b) else "-",
+                "Change": f"{a[i] if i < len(a) else '-'}>{b[i] if i < len(b) else '-'}",
+            })
+    return pd.DataFrame(rows)
+
+
+def amino_acid_properties(seq):
+    s = clean_sequence(seq)
+    if not s:
+        return {}
+    aa = Counter(s)
+    weights = {
+        "A": 89.09, "R": 174.20, "N": 132.12, "D": 133.10,
+        "C": 121.15, "Q": 146.15, "E": 147.13, "G": 75.07,
+        "H": 155.16, "I": 131.17, "L": 131.17, "K": 146.19,
+        "M": 149.21, "F": 165.19, "P": 115.13, "S": 105.09,
+        "T": 119.12, "W": 204.23, "Y": 181.19, "V": 117.15,
+    }
+    mw = sum(aa[k] * v for k, v in aa.items() if k in weights)
+    acidic = aa["D"] + aa["E"]
+    basic = aa["K"] + aa["R"] + aa["H"]
+    return {
+        "Length (aa)": len(s),
+        "Molecular weight (Da, approx.)": mw,
+        "Acidic residues": acidic,
+        "Basic residues": basic,
+        "Basic - acidic": basic - acidic,
+        "Hydrophobic fraction": sum(aa[x] for x in "AILMFWVY") / len(s),
+        "Cysteines": aa["C"],
+        "Prolines": aa["P"],
+    }
+
+
+def cpg_count(seq):
+    s = clean_sequence(seq)
+    return sum(1 for i in range(len(s) - 1) if s[i:i+2] == "CG")
+
+
+def all_orfs(seq, min_aa=10):
+    s = clean_sequence(seq)
+    if set(s) - DNA:
+        return pd.DataFrame()
+    rows = []
+    for frame in range(3):
+        start = None
+        for i in range(frame, len(s) - 2, 3):
+            codon = s[i:i+3]
+            if start is None and codon == "ATG":
+                start = i
+            elif start is not None and codon in STOP_CODONS:
+                aa_len = (i - start) // 3
+                if aa_len >= min_aa:
+                    frag = s[start:i+3]
+                    rows.append({
+                        "Frame": frame + 1,
+                        "Start": start + 1,
+                        "Stop": i + 3,
+                        "NT length": len(frag),
+                        "AA length": aa_len,
+                        "Protein": str(Seq(frag).translate(to_stop=True)),
+                    })
+                start = None
+    return pd.DataFrame(rows)
+
+
+
+
+def hierarchical_tree_edges(distance_matrix):
+    """
+    Simple UPGMA-style clustering from a distance matrix.
+    Returns a dataframe of merge operations suitable for visualization.
+    """
+    ids = list(distance_matrix.index)
+    clusters = {i: [i] for i in ids}
+    heights = {i: 0.0 for i in ids}
+    rows = []
+    next_id = 1
+    while len(clusters) > 1:
+        keys = list(clusters.keys())
+        best = None
+        best_d = float("inf")
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                a, b = keys[i], keys[j]
+                vals = []
+                for x in clusters[a]:
+                    for y in clusters[b]:
+                        vals.append(float(distance_matrix.loc[x, y]))
+                d = sum(vals) / len(vals)
+                if d < best_d:
+                    best_d, best = d, (a, b)
+        a, b = best
+        name = f"Cluster {next_id}"
+        next_id += 1
+        rows.append({"Cluster": name, "Left": a, "Right": b, "Distance": best_d})
+        clusters[name] = clusters[a] + clusters[b]
+        heights[name] = best_d / 2
+        del clusters[a]
+        del clusters[b]
+    return pd.DataFrame(rows)
+
+
 # Input
 if "records" not in st.session_state: st.session_state.records=[]
 with st.sidebar:
@@ -266,10 +592,19 @@ m1,m2,m3,m4,m5,m6=st.columns(6)
 m1.metric("Sequences",f"{len(df):,}");m2.metric("Total bases",f"{int(df['Length'].sum()):,}")
 m3.metric("Mean length",f"{df['Length'].mean():,.0f}");m4.metric("Mean GC%",f"{df['GC %'].mean():.2f}%")
 m5.metric("PASS QC",f"{(df['QC Status']=='PASS').sum():,}");m6.metric("Needs review",f"{(df['QC Status']!='PASS').sum():,}")
+st.markdown("""
+<div class="panel">
+  <div class="panel-title">Analysis workspace</div>
+  <div class="panel-text">Dataset loaded and ready. Move from validation and QC to
+  composition, alignment, comparison and export using the navigation above.</div>
+</div>
+""", unsafe_allow_html=True)
+
 
 tabs=st.tabs(["🏠 Dashboard","🧾 Sequence Table","📈 Charts","🧹 Research QC","🔬 Sliding Analysis",
               "🧬 ORF & Translation","🧪 Motif Lab","🔢 k-mer & Codon","🧫 Restriction Sites",
-              "🧪 Primer Lab","🔎 Compare","📄 Report","⬇️ Export"])
+              "🧪 Primer Lab","🔎 Compare","🧬 Alignment","🧪 Variants","🌳 Phylogeny",
+              "🧫 Advanced Biology","📄 Report","⬇️ Export"])
 
 with tabs[0]:
     st.subheader("Dataset Dashboard")
@@ -420,13 +755,145 @@ with tabs[10]:
         long=cdf.melt(id_vars="ID",value_vars=["A","T","G","C"],var_name="Base",value_name="Count")
         st.plotly_chart(px.bar(long,x="ID",y="Count",color="Base",barmode="group",title="Base Composition Comparison"),use_container_width=True)
 
+
 with tabs[11]:
+    st.subheader("Multiple Sequence Alignment")
+    st.markdown('<div class="section-note">Progressive alignment, consensus and conservation across selected sequences.</div>', unsafe_allow_html=True)
+    selected = st.multiselect("Sequences for MSA", list(df["ID"]),
+                              default=list(df["ID"])[:min(5, len(df))], key="msa_select")
+    if len(selected) < 2:
+        st.info("Select at least two sequences.")
+    else:
+        seqs = [clean_sequence(next(r for r in records if r.id == sid).seq) for sid in selected]
+        aligned = simple_global_align_many(seqs)
+        msa_df = pd.DataFrame({"ID": selected, "Aligned sequence": aligned})
+        st.dataframe(msa_df, use_container_width=True, hide_index=True)
+
+        consensus = consensus_from_alignment(aligned)
+        st.markdown("### Consensus sequence")
+        st.code(consensus, language="text")
+
+        cons_df = conservation_table(aligned)
+        st.plotly_chart(px.line(cons_df, x="Position", y="Conservation %",
+                               title="Conservation profile"),
+                        use_container_width=True)
+        st.dataframe(cons_df, use_container_width=True, hide_index=True)
+
+        st.download_button("⬇️ Download alignment FASTA",
+                           normalized_fasta([
+                               type("Rec", (), {"description": sid, "seq": aln, "id": sid})()
+                               for sid, aln in zip(selected, aligned)
+                           ]),
+                           file_name="multiple_sequence_alignment.fasta",
+                           mime="text/plain", use_container_width=True)
+
+
+with tabs[12]:
+    st.subheader("Variant / SNP Comparison")
+    st.markdown('<div class="section-note">Screen nucleotide differences between a reference and query sequence.</div>', unsafe_allow_html=True)
+    ref_id = st.selectbox("Reference sequence", list(df["ID"]), key="variant_ref")
+    qry_id = st.selectbox("Query sequence", [x for x in df["ID"] if x != ref_id],
+                          key="variant_query")
+    ref_seq = clean_sequence(next(r for r in records if r.id == ref_id).seq)
+    qry_seq = clean_sequence(next(r for r in records if r.id == qry_id).seq)
+    vdf = variant_table(ref_seq, qry_seq)
+    a, b, c = st.columns(3)
+    a.metric("Differences", len(vdf))
+    b.metric("Reference length", len(ref_seq))
+    c.metric("Query length", len(qry_seq))
+    if vdf.empty:
+        st.success("No differences detected in the overlapping sequence region.")
+    else:
+        st.dataframe(vdf, use_container_width=True, hide_index=True)
+        st.plotly_chart(px.histogram(vdf, x="Position", nbins=min(30, max(5, len(vdf))),
+                                     title="Variant positions"),
+                        use_container_width=True)
+        st.download_button("⬇️ Download variants CSV",
+                           vdf.to_csv(index=False).encode(),
+                           file_name="sequence_variants.csv",
+                           mime="text/csv", use_container_width=True)
+
+
+with tabs[13]:
+    st.subheader("Distance Matrix & Phylogenetic Clustering")
+    st.markdown('<div class="section-note">Inspect pairwise distances and lightweight hierarchical clustering.</div>', unsafe_allow_html=True)
+    if len(records) < 2:
+        st.info("At least two sequences are required.")
+    else:
+        dist = pairwise_distance_matrix(records)
+        st.dataframe(dist.round(4), use_container_width=True)
+        st.plotly_chart(px.imshow(dist, text_auto=".3f", aspect="auto",
+                                   title="Pairwise Distance Matrix"),
+                        use_container_width=True)
+
+        edges = hierarchical_tree_edges(dist)
+        st.markdown("### UPGMA-style clustering steps")
+        st.dataframe(edges, use_container_width=True, hide_index=True)
+
+        # A simple tree-like merge chart.
+        if not edges.empty:
+            chart = edges.copy()
+            chart["Merge order"] = range(1, len(chart) + 1)
+            st.plotly_chart(px.scatter(chart, x="Merge order", y="Distance",
+                                       text="Cluster", title="Hierarchical Clustering"),
+                            use_container_width=True)
+
+        st.caption("The clustering shown here is a lightweight UPGMA-style distance analysis, not a substitute for a publication-grade phylogenetic pipeline.")
+
+
+with tabs[14]:
+    st.subheader("Advanced Molecular Biology")
+
+    sid = st.selectbox("Sequence", list(df["ID"]), key="advanced_bio")
+    seq = clean_sequence(next(r for r in records if r.id == sid).seq)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### Sequence transformations")
+        st.text_area("Reverse complement", reverse_complement(seq), height=100)
+        st.text_area("DNA → RNA", dna_to_rna(seq), height=100)
+        st.text_area("RNA → DNA", rna_to_dna(seq), height=100)
+
+    with c2:
+        st.markdown("### CpG / nucleotide features")
+        st.metric("CpG dinucleotides", cpg_count(seq))
+        st.metric("CpG density / kb", 1000 * cpg_count(seq) / len(seq) if seq else 0)
+        st.metric("Ambiguous bases", ambiguous_count(seq))
+
+    st.markdown("### All ORFs")
+    min_orf = st.number_input("Minimum ORF length (aa)", 0, 10000, 10, 5)
+    orfs = all_orfs(seq, int(min_orf))
+    if orfs.empty:
+        st.info("No ORFs met the selected threshold.")
+    else:
+        st.dataframe(orfs.drop(columns=["Protein"]), use_container_width=True, hide_index=True)
+        st.plotly_chart(px.bar(orfs, x="Start", y="AA length", color="Frame",
+                               title="Detected ORFs"),
+                        use_container_width=True)
+
+    st.markdown("### Protein properties")
+    protein_input = st.text_area("Paste protein sequence (optional)", "")
+    if protein_input.strip():
+        props = amino_acid_properties(protein_input)
+        st.dataframe(pd.DataFrame([props]).T.rename(columns={0: "Value"}),
+                     use_container_width=True)
+
+
+with tabs[15]:
     st.subheader("Automated Research Report")
     report=make_report(df);st.text_area("Report preview",report,height=430)
     st.download_button("⬇️ Download report",report.encode(),file_name="multi_fasta_analysis_report.txt",mime="text/plain",use_container_width=True)
 
-with tabs[12]:
+with tabs[16]:
     st.subheader("Export Center")
+
+    st.markdown("### Advanced exports")
+    st.download_button("⬇️ Detailed statistics CSV",
+                       df.to_csv(index=False).encode(),
+                       file_name="detailed_sequence_statistics.csv",
+                       mime="text/csv", use_container_width=True)
+
+
     st.download_button("⬇️ CSV",df.to_csv(index=False).encode(),file_name="sequence_statistics.csv",mime="text/csv",use_container_width=True)
     st.download_button("⬇️ Normalized FASTA",normalized_fasta(records),file_name="normalized_sequences.fasta",mime="text/plain",use_container_width=True)
     xbuf=io.BytesIO()
